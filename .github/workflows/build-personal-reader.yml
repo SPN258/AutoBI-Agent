@@ -1,0 +1,538 @@
+name: Build Personal Reader
+
+on:
+  push:
+    branches:
+      - personal-reader-build-20260929
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout upstream Legado
+        uses: actions/checkout@v5
+        with:
+          repository: HapeLee/legado-with-MD3
+          ref: 05fd81de7878462936f2652966207e8f985296aa
+          path: legado
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Apply personal-reader patch and fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd legado
+          mkdir -p app/src/main/java/io/legado/app/utils
+          mkdir -p app/src/test/java/io/legado/app/utils
+          mkdir -p app/src/test/java/io/legado/app/model/analyzeRule
+          mkdir -p app/src/test/resources/personalReader
+
+          cat > app/src/main/java/io/legado/app/utils/SensitiveLogRedactor.kt <<'EOF'
+          package io.legado.app.utils
+
+          object SensitiveLogRedactor {
+              private const val REDACTED = "[REDACTED]"
+
+              private val headerPattern = Regex(
+                  """(?im)\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key|Api-Key)\s*:\s*[^\r\n]+"""
+              )
+
+              private val assignmentPattern = Regex(
+                  """(?i)\b(access[_-]?token|refresh[_-]?token|token|password|passwd|pwd|secret|api[_-]?key|authorization|cookie)=([^&\s]+)"""
+              )
+
+              private val jsonPattern = Regex(
+                  """(?i)(["']?(?:access[_-]?token|refresh[_-]?token|token|password|passwd|pwd|secret|api[_-]?key|authorization|cookie)["']?\s*:\s*)(["'])(.*?)(\2)"""
+              )
+
+              fun redact(value: String?): String {
+                  if (value == null) return ""
+                  var safe = headerPattern.replace(value) { match ->
+                      "${match.groupValues[1]}: $REDACTED"
+                  }
+                  safe = jsonPattern.replace(safe) { match ->
+                      "${match.groupValues[1]}${match.groupValues[2]}$REDACTED${match.groupValues[2]}"
+                  }
+                  safe = assignmentPattern.replace(safe) { match ->
+                      "${match.groupValues[1]}=$REDACTED"
+                  }
+                  return safe
+              }
+
+              fun redactThrowable(throwable: Throwable?): Throwable? {
+                  throwable ?: return null
+                  return RuntimeException(redact(throwable.toString())).apply {
+                      stackTrace = throwable.stackTrace
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/io/legado/app/constant/AppLog.kt <<'EOF'
+          package io.legado.app.constant
+
+          import android.util.Log
+          import io.legado.app.BuildConfig
+          import io.legado.app.domain.gateway.OtherSettingsGateway
+          import io.legado.app.utils.LogUtils
+          import io.legado.app.utils.SensitiveLogRedactor
+          import io.legado.app.utils.toastOnUi
+          import org.koin.core.context.GlobalContext
+          import splitties.init.appCtx
+
+          object AppLog {
+
+              private val otherGateway by lazy { GlobalContext.get().get<OtherSettingsGateway>() }
+
+              private val mLogs = arrayListOf<Triple<Long, String, Throwable?>>()
+
+              val logs get() = mLogs.toList()
+
+              @Synchronized
+              fun put(message: String?, throwable: Throwable? = null, toast: Boolean = false) {
+                  message ?: return
+                  if (toast) {
+                      appCtx.toastOnUi(message)
+                  }
+                  if (mLogs.size > 100) {
+                      mLogs.removeLastOrNull()
+                  }
+                  val safeMessage = SensitiveLogRedactor.redact(message)
+                  val safeThrowable = SensitiveLogRedactor.redactThrowable(throwable)
+                  if (safeThrowable == null) {
+                      LogUtils.d("AppLog", safeMessage)
+                  } else {
+                      LogUtils.d("AppLog", "$safeMessage\n${SensitiveLogRedactor.redact(safeThrowable.stackTraceToString())}")
+                  }
+                  mLogs.add(0, Triple(System.currentTimeMillis(), safeMessage, safeThrowable))
+                  if (BuildConfig.DEBUG) {
+                      val stackTrace = Thread.currentThread().stackTrace
+                      if (safeThrowable == null) {
+                          Log.e(stackTrace[3].className, safeMessage)
+                      } else {
+                          Log.e(
+                              stackTrace[3].className,
+                              "$safeMessage\n${SensitiveLogRedactor.redact(safeThrowable.stackTraceToString())}"
+                          )
+                      }
+                  }
+              }
+
+              @Synchronized
+              fun putNotSave(message: String?, throwable: Throwable? = null, toast: Boolean = false) {
+                  message ?: return
+                  if (toast) {
+                      appCtx.toastOnUi(message)
+                  }
+                  if (mLogs.size > 100) {
+                      mLogs.removeLastOrNull()
+                  }
+                  val safeMessage = SensitiveLogRedactor.redact(message)
+                  val safeThrowable = SensitiveLogRedactor.redactThrowable(throwable)
+                  mLogs.add(0, Triple(System.currentTimeMillis(), safeMessage, safeThrowable))
+                  if (BuildConfig.DEBUG) {
+                      val stackTrace = Thread.currentThread().stackTrace
+                      if (safeThrowable == null) {
+                          Log.e(stackTrace[3].className, safeMessage)
+                      } else {
+                          Log.e(
+                              stackTrace[3].className,
+                              "$safeMessage\n${SensitiveLogRedactor.redact(safeThrowable.stackTraceToString())}"
+                          )
+                      }
+                  }
+              }
+
+              @Synchronized
+              fun clear() {
+                  mLogs.clear()
+              }
+
+              fun putDebug(message: String?, throwable: Throwable? = null) {
+                  if (otherGateway.currentSettings.recordLog) {
+                      put(message, throwable)
+                  }
+              }
+
+          }
+          EOF
+
+          cat > app/src/main/java/io/legado/app/utils/DebugLog.kt <<'EOF'
+          package io.legado.app.utils
+
+          import android.util.Log
+          import io.legado.app.BuildConfig
+
+          object DebugLog {
+
+              fun e(tag: String, throwable: Throwable) {
+                  if (BuildConfig.DEBUG) {
+                      Log.e(tag, SensitiveLogRedactor.redact(throwable.stackTraceToString()))
+                  }
+              }
+
+              fun e(tag: String, msg: String, throwable: Throwable? = null) {
+                  if (BuildConfig.DEBUG) {
+                      Log.e(tag, merged(msg, throwable))
+                  }
+              }
+
+              fun d(tag: String, msg: String, throwable: Throwable? = null) {
+                  if (BuildConfig.DEBUG) {
+                      Log.d(tag, merged(msg, throwable))
+                  }
+              }
+
+              fun i(tag: String, msg: String, throwable: Throwable? = null) {
+                  if (BuildConfig.DEBUG) {
+                      Log.i(tag, merged(msg, throwable))
+                  }
+              }
+
+              fun w(tag: String, msg: String, throwable: Throwable? = null) {
+                  if (BuildConfig.DEBUG) {
+                      Log.w(tag, merged(msg, throwable))
+                  }
+              }
+
+              private fun merged(msg: String, throwable: Throwable?): String {
+                  val safeMessage = SensitiveLogRedactor.redact(msg)
+                  if (throwable == null) return safeMessage
+                  return "$safeMessage\n${SensitiveLogRedactor.redact(throwable.stackTraceToString())}"
+              }
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("app/src/main/java/io/legado/app/model/Debug.kt")
+          text = path.read_text()
+          old_import = "import io.legado.app.utils.HtmlFormatter\n"
+          new_import = old_import + "import io.legado.app.utils.SensitiveLogRedactor\n"
+          if "import io.legado.app.utils.SensitiveLogRedactor" not in text:
+              text = text.replace(old_import, new_import, 1)
+
+          old = '''        if (BuildConfig.DEBUG) {
+                      Log.d("sourceDebug", msg)
+                  }
+                  //调试信息始终要执行
+                  val event = Event(
+          '''
+          new = '''        val safeMsg = SensitiveLogRedactor.redact(msg)
+                  if (BuildConfig.DEBUG) {
+                      Log.d("sourceDebug", safeMsg)
+                  }
+                  //调试信息始终要执行
+                  val event = Event(
+          '''
+          if old not in text:
+              raise SystemExit("Debug.kt logging block not found")
+          text = text.replace(old, new, 1)
+
+          old = '''            message = if (isHtml) HtmlFormatter.format(msg) else msg,
+          '''
+          new = '''            message = if (isHtml) HtmlFormatter.format(safeMsg) else safeMsg,
+          '''
+          if old not in text:
+              raise SystemExit("Debug.kt event message line not found")
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+
+          cat > app/src/test/java/io/legado/app/utils/SensitiveLogRedactorTest.kt <<'EOF'
+          package io.legado.app.utils
+
+          import org.junit.Assert.assertFalse
+          import org.junit.Assert.assertTrue
+          import org.junit.Test
+
+          class SensitiveLogRedactorTest {
+
+              @Test
+              fun `redacts headers query parameters assignments and json secrets`() {
+                  val raw = """
+                      Authorization: Bearer top-secret
+                      Cookie: session=abc123
+                      https://fixture.invalid/path?token=query-secret&safe=1
+                      password=form-secret
+                      {"api_key":"json-secret","refresh_token":"refresh-secret","title":"keep-me"}
+                  """.trimIndent()
+
+                  val safe = SensitiveLogRedactor.redact(raw)
+
+                  assertTrue(safe.contains("[REDACTED]"))
+                  assertTrue(safe.contains("safe=1"))
+                  assertTrue(safe.contains("keep-me"))
+                  assertFalse(safe.contains("top-secret"))
+                  assertFalse(safe.contains("abc123"))
+                  assertFalse(safe.contains("query-secret"))
+                  assertFalse(safe.contains("form-secret"))
+                  assertFalse(safe.contains("json-secret"))
+                  assertFalse(safe.contains("refresh-secret"))
+              }
+
+              @Test
+              fun `redacted throwable keeps stack location but not secret message`() {
+                  val original = IllegalStateException("token=boom-secret")
+                  original.stackTrace = arrayOf(StackTraceElement("Example", "call", "Example.kt", 7))
+
+                  val safe = SensitiveLogRedactor.redactThrowable(original)!!
+
+                  assertFalse(safe.toString().contains("boom-secret"))
+                  assertTrue(safe.toString().contains("[REDACTED]"))
+                  assertTrue(safe.stackTrace.contentEquals(original.stackTrace))
+              }
+          }
+          EOF
+
+          cat > app/src/test/resources/personalReader/book_source.json <<'EOF'
+          {
+            "bookSourceUrl": "https://fixture.invalid",
+            "bookSourceName": "Personal Reader Fixture",
+            "bookSourceGroup": "test-only",
+            "enabled": true,
+            "searchUrl": "https://fixture.invalid/search?q={{key}}&page={{page}}",
+            "ruleSearch": {
+              "bookList": "@css:.book",
+              "name": "@css:.name@text",
+              "author": "@css:.author@text",
+              "intro": "@css:.intro@text",
+              "bookUrl": "@css:.name@href"
+            },
+            "ruleBookInfo": {
+              "name": "@css:h1@text",
+              "author": "@css:.author@text",
+              "intro": "@css:#intro@text",
+              "tocUrl": "@css:a.toc@href"
+            },
+            "ruleToc": {
+              "chapterList": "@css:.chapter",
+              "chapterName": "@css:a@text",
+              "chapterUrl": "@css:a@href",
+              "nextTocUrl": "@css:a.next@href"
+            },
+            "ruleContent": {
+              "content": "@css:#content@text",
+              "nextContentUrl": "@css:a.next-page@href"
+            }
+          }
+          EOF
+
+          cat > app/src/test/resources/personalReader/search.html <<'EOF'
+          <!doctype html>
+          <html><body>
+            <div class="book">
+              <a class="name" href="/book/1">原创测试小说</a>
+              <span class="author">测试作者</span>
+              <p class="intro">只用于自动化测试的原创简介。</p>
+            </div>
+          </body></html>
+          EOF
+
+          cat > app/src/test/resources/personalReader/detail.html <<'EOF'
+          <!doctype html>
+          <html><body>
+            <h1>原创测试小说</h1>
+            <span class="author">测试作者</span>
+            <div id="intro">这是原创测试详情，不包含第三方小说正文。</div>
+            <a class="toc" href="/book/1/toc?page=1">目录</a>
+          </body></html>
+          EOF
+
+          cat > app/src/test/resources/personalReader/toc_page_1.html <<'EOF'
+          <!doctype html>
+          <html><body>
+            <div class="chapter"><a href="/book/1/chapter/1">第一章 起点</a></div>
+            <div class="chapter"><a href="/book/1/chapter/2">第二章 转折</a></div>
+            <a class="next" href="/book/1/toc?page=2">下一页目录</a>
+          </body></html>
+          EOF
+
+          cat > app/src/test/resources/personalReader/toc_page_2.html <<'EOF'
+          <!doctype html>
+          <html><body>
+            <div class="chapter"><a href="/book/1/chapter/3">第三章 收束</a></div>
+          </body></html>
+          EOF
+
+          cat > app/src/test/resources/personalReader/chapter_1_page_1.html <<'EOF'
+          <!doctype html>
+          <html><body>
+            <article id="content">第一章第一页。风吹过空旷的小路。</article>
+            <a class="next-page" href="/book/1/chapter/1?page=2">本章下一页</a>
+          </body></html>
+          EOF
+
+          cat > app/src/test/resources/personalReader/chapter_1_page_2.html <<'EOF'
+          <!doctype html>
+          <html><body>
+            <article id="content">第一章第二页。灯光在窗边停下。</article>
+            <a class="next-chapter" href="/book/1/chapter/2">下一章</a>
+          </body></html>
+          EOF
+
+          cat > app/src/test/resources/personalReader/chapter_2.html <<'EOF'
+          <!doctype html>
+          <html><body>
+            <article id="content">第二章正文哨兵：不得拼入第一章。</article>
+          </body></html>
+          EOF
+
+          cat > app/src/test/java/io/legado/app/model/analyzeRule/PersonalReaderFixtureRuleTest.kt <<'EOF'
+          package io.legado.app.model.analyzeRule
+
+          import android.app.Application
+          import io.legado.app.data.entities.BookSource
+          import io.legado.app.utils.GSON
+          import io.legado.app.utils.fromJsonObject
+          import org.junit.Assert.assertEquals
+          import org.junit.Assert.assertFalse
+          import org.junit.Assert.assertTrue
+          import org.junit.Before
+          import org.junit.Test
+          import org.junit.runner.RunWith
+          import org.robolectric.RobolectricTestRunner
+          import org.robolectric.RuntimeEnvironment
+          import org.robolectric.annotation.Config
+          import splitties.init.injectAsAppCtx
+
+          @RunWith(RobolectricTestRunner::class)
+          @Config(application = Application::class, sdk = [34])
+          class PersonalReaderFixtureRuleTest {
+
+              @Before
+              fun setUp() {
+                  RuntimeEnvironment.getApplication().injectAsAppCtx()
+              }
+
+              private fun fixture(name: String): String {
+                  val stream = javaClass.classLoader!!.getResourceAsStream("personalReader/$name")
+                      ?: error("missing fixture: $name")
+                  return stream.bufferedReader().use { it.readText() }
+              }
+
+              private fun source(): BookSource =
+                  GSON.fromJsonObject<BookSource>(fixture("book_source.json")).getOrThrow()
+
+              @Test
+              fun `real Legado model and AnalyzeRule parse search detail toc and content fixtures`() {
+                  val source = source()
+
+                  assertEquals("Personal Reader Fixture", source.bookSourceName)
+                  assertTrue(source.searchUrl!!.contains("{{key}}"))
+                  assertTrue(source.searchUrl!!.contains("{{page}}"))
+
+                  val search = AnalyzeRule(RuleData(), source).setContent(fixture("search.html"))
+                  val searchItem = search.getElements(source.getSearchRule().bookList!!).single()
+                  assertEquals("原创测试小说", search.getString(source.getSearchRule().name, searchItem))
+                  assertEquals("测试作者", search.getString(source.getSearchRule().author, searchItem))
+
+                  val detail = AnalyzeRule(RuleData(), source).setContent(fixture("detail.html"))
+                  assertEquals("原创测试小说", detail.getString(source.getBookInfoRule().name))
+                  assertEquals("测试作者", detail.getString(source.getBookInfoRule().author))
+                  assertTrue(detail.getString(source.getBookInfoRule().intro).contains("原创测试详情"))
+
+                  val toc1 = AnalyzeRule(RuleData(), source).setContent(fixture("toc_page_1.html"))
+                  val tocItems = toc1.getElements(source.getTocRule().chapterList!!)
+                  assertEquals(2, tocItems.size)
+                  assertEquals("第一章 起点", toc1.getString(source.getTocRule().chapterName, tocItems[0]))
+                  assertEquals("第二章 转折", toc1.getString(source.getTocRule().chapterName, tocItems[1]))
+                  assertEquals("/book/1/toc?page=2", toc1.getString(source.getTocRule().nextTocUrl))
+
+                  val toc2 = AnalyzeRule(RuleData(), source).setContent(fixture("toc_page_2.html"))
+                  val toc2Items = toc2.getElements(source.getTocRule().chapterList!!)
+                  assertEquals(1, toc2Items.size)
+                  assertEquals("第三章 收束", toc2.getString(source.getTocRule().chapterName, toc2Items[0]))
+
+                  val chapter1Page1 = AnalyzeRule(RuleData(), source)
+                      .setContent(fixture("chapter_1_page_1.html"))
+                  assertTrue(chapter1Page1.getString(source.getContentRule().content).contains("第一章第一页"))
+                  assertEquals(
+                      "/book/1/chapter/1?page=2",
+                      chapter1Page1.getString(source.getContentRule().nextContentUrl)
+                  )
+
+                  val chapter1Page2 = AnalyzeRule(RuleData(), source)
+                      .setContent(fixture("chapter_1_page_2.html"))
+                  val page2Content = chapter1Page2.getString(source.getContentRule().content)
+                  assertTrue(page2Content.contains("第一章第二页"))
+                  assertFalse(page2Content.contains("第二章正文哨兵"))
+                  assertEquals("", chapter1Page2.getString(source.getContentRule().nextContentUrl))
+              }
+
+              @Test
+              fun `malformed source json fails explicitly instead of producing a source`() {
+                  val result = GSON.fromJsonObject<BookSource>("{\"bookSourceName\":")
+                  assertTrue(result.isFailure)
+              }
+          }
+          EOF
+
+          sed -i '/maven.aliyun.com/d' settings.gradle
+
+          git diff --check
+          git status --short
+          git diff -- app/src/main/java/io/legado/app/constant/AppLog.kt                      app/src/main/java/io/legado/app/model/Debug.kt                      app/src/main/java/io/legado/app/utils/DebugLog.kt                      app/src/main/java/io/legado/app/utils/SensitiveLogRedactor.kt                      app/src/test/java/io/legado/app/utils/SensitiveLogRedactorTest.kt                      app/src/test/java/io/legado/app/model/analyzeRule/PersonalReaderFixtureRuleTest.kt                      app/src/test/resources/personalReader > ../PERSONAL_READER_PATCH.diff
+
+      - name: Run focused tests
+        working-directory: legado
+        env:
+          APP_VERSION_NAME: 3.26.16-personal.1
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          ./gradlew             testAppDebugUnitTest             --tests io.legado.app.utils.SensitiveLogRedactorTest             --tests io.legado.app.model.analyzeRule.PersonalReaderFixtureRuleTest             --no-daemon             --no-configuration-cache | tee ../focused-tests.log
+
+      - name: Run repository verification and build custom APK
+        working-directory: legado
+        env:
+          APP_VERSION_NAME: 3.26.16-personal.1
+        run: |
+          set -o pipefail
+          ./gradlew             testAppDebugUnitTest             lintAppDebug             verifyConfigArchitecture             assembleAppDebug             --continue             --no-daemon             --no-configuration-cache | tee ../full-build.log
+
+      - name: Collect APK and provenance
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          if [ -d legado/app/build/outputs/apk ]; then
+            find legado/app/build/outputs/apk -type f -name '*.apk' -print -exec cp {} out/ \;
+          fi
+          cp PERSONAL_READER_PATCH.diff out/ || true
+          cp focused-tests.log out/ || true
+          cp full-build.log out/ || true
+          {
+            echo "UPSTREAM_REPO=HapeLee/legado-with-MD3"
+            echo "UPSTREAM_SHA=05fd81de7878462936f2652966207e8f985296aa"
+            echo "CUSTOM_VERSION=3.26.16-personal.1"
+            echo "WORKFLOW_REPO=SPN258/AutoBI-Agent"
+            echo "WORKFLOW_RUN=$GITHUB_RUN_ID"
+            echo "WORKFLOW_SHA=$GITHUB_SHA"
+          } > out/BUILD_PROVENANCE.txt
+          (cd out && sha256sum * > SHA256SUMS.txt || true)
+          find out -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Upload custom APK and evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: personal-reader-build
+          if-no-files-found: warn
+          path: out/**
+          retention-days: 30
