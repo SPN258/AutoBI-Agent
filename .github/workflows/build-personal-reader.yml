@@ -1074,7 +1074,6 @@ jobs:
 
           p = Path("app/build.gradle.kts")
           s = p.read_text()
-          s = s.replace('applicationIdSuffix = ".debug"', 'applicationIdSuffix = ".private"', 1)
           s = s.replace('versionNameSuffix = "_debug"', 'versionNameSuffix = "-private"', 1)
           p.write_text(s)
           PY
