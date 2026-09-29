@@ -1074,6 +1074,7 @@ jobs:
 
           p = Path("app/build.gradle.kts")
           s = p.read_text()
+          s = s.replace('applicationIdSuffix = ".debug"', 'applicationIdSuffix = ".private"', 1)
           s = s.replace('versionNameSuffix = "_debug"', 'versionNameSuffix = "-private"', 1)
           p.write_text(s)
           PY
@@ -1081,23 +1082,16 @@ jobs:
           cat > app/src/test/java/io/legado/app/ui/main/PersonalReaderBrandingTest.kt <<'EOF'
           package io.legado.app.ui.main
 
-          import android.app.Application
+          import io.legado.app.BuildConfig
           import io.legado.app.R
           import org.junit.Assert.assertEquals
           import org.junit.Test
-          import org.junit.runner.RunWith
-          import org.robolectric.RobolectricTestRunner
-          import org.robolectric.RuntimeEnvironment
-          import org.robolectric.annotation.Config
 
-          @RunWith(RobolectricTestRunner::class)
-          @Config(application = Application::class, sdk = [35])
           class PersonalReaderBrandingTest {
 
               @Test
-              fun `debug build is branded and main navigation is focused on reading`() {
-                  val app = RuntimeEnvironment.getApplication()
-                  assertEquals("Private Reader", app.getString(R.string.app_name))
+              fun `private build has isolated identity and focused navigation`() {
+                  assertEquals("io.legato.kazusa.private", BuildConfig.APPLICATION_ID)
                   assertEquals(
                       listOf("bookshelf", "home", "my"),
                       MainDestination.mainDestinations.map { it.route },
@@ -1106,6 +1100,11 @@ jobs:
               }
           }
           EOF
+
+          grep -Fq '<string name="app_name">Private Reader</string>' app/src/debug/res/values/strings.xml
+          grep -Fq '<string name="app_name">私阅</string>' app/src/debug/res/values-zh-rCN/strings.xml
+          grep -Fq 'applicationIdSuffix = ".private"' app/build.gradle.kts
+          grep -Fq 'versionNameSuffix = "-private"' app/build.gradle.kts
 
           sed -i '/maven.aliyun.com/d' settings.gradle
 
