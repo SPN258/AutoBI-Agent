@@ -1106,6 +1106,28 @@ jobs:
           grep -Fq 'applicationIdSuffix = ".private"' app/build.gradle.kts
           grep -Fq 'versionNameSuffix = "-private"' app/build.gradle.kts
 
+          python3 - <<'PY'
+          import copy
+          import json
+          from pathlib import Path
+
+          path = Path("app/google-services.json")
+          data = json.loads(path.read_text())
+          source = next(
+              client for client in data["client"]
+              if client["client_info"]["android_client_info"]["package_name"] == "io.legato.kazusa.debug"
+          )
+          private_client = copy.deepcopy(source)
+          private_client["client_info"]["android_client_info"]["package_name"] = "io.legato.kazusa.private"
+          data["client"] = [
+              client for client in data["client"]
+              if client["client_info"]["android_client_info"]["package_name"] != "io.legato.kazusa.private"
+          ]
+          data["client"].append(private_client)
+          path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+          PY
+          grep -Fq '"package_name": "io.legato.kazusa.private"' app/google-services.json
+
           sed -i '/maven.aliyun.com/d' settings.gradle
 
           git diff --check
