@@ -1097,7 +1097,7 @@ jobs:
               @Test
               fun `debug build is branded and main navigation is focused on reading`() {
                   val app = RuntimeEnvironment.getApplication()
-                  assertEquals("私阅", app.getString(R.string.app_name))
+                  assertEquals("Private Reader", app.getString(R.string.app_name))
                   assertEquals(
                       listOf("bookshelf", "home", "my"),
                       MainDestination.mainDestinations.map { it.route },
