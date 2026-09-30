@@ -1,0 +1,54 @@
+name: Build Siyue From Scratch
+
+on:
+  push:
+    branches:
+      - siyue-from-scratch-20260930
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.8.0
+      - name: Unit tests
+        working-directory: siyue
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+      - name: Build APK
+        working-directory: siyue
+        run: gradle assembleDebug lintDebug --no-daemon --stacktrace
+      - name: Collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/source
+          cp siyue/app/build/outputs/apk/debug/app-debug.apk out/siyue-0.1.0-dev.apk
+          cp -R siyue/* out/source/
+          cd out
+          zip -qr siyue-source-0.1.0.zip source
+          rm -rf source
+          sha256sum siyue-0.1.0-dev.apk siyue-source-0.1.0.zip > SHA256SUMS.txt
+          {
+            echo "PACKAGE=com.spn258.siyue.dev"
+            echo "VERSION=0.1.0-dev"
+            echo "DESIGN=from-scratch"
+            echo "LEGADO_UI_REUSED=false"
+            echo "LEGADO_ENGINE_STATUS=interface-only-not-integrated"
+            echo "COMMIT=$GITHUB_SHA"
+          } > BUILD_PROVENANCE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: siyue-from-scratch
+          path: out/**
+          retention-days: 30
